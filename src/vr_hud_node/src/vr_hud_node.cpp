@@ -56,13 +56,13 @@ public:
             { image_callback(msg); });
 
         std::vector<std::string> def_topics = {
-            "/gamepad/left_trigger",
+            "/host/speed",
             "/rover/gear,/host/gear",
-            "/gamepad/left_stick_x",
+            "/host/scam",
             "/gamepad/left_stick_y",
             "/gamepad/right_stick_x",
-            "/gamepad/right_stick_y"};
-        std::vector<std::string> def_labels = {"LT", "G", "LX", "LY", "RX", "RY"};
+            "/rover/tdir,/host/tdir"};
+        std::vector<std::string> def_labels = {"LT", "G", "C", "LY", "RX", "D"};
         std::vector<std::string> def_units = {"", "", "", "", "", ""};
 
         auto slot_param = [this](const std::string &name, const std::vector<std::string> &def)
@@ -98,7 +98,8 @@ public:
         {
             slots_[i].label = labels[i];
             slots_[i].unit = units[i];
-            slots_[i].is_int = (topics[i].find("gear") != std::string::npos);
+            slots_[i].is_dir = (topics[i].find("tdir") != std::string::npos);
+            slots_[i].is_int = slots_[i].is_dir || (topics[i].find("gear") != std::string::npos || topics[i].find("scam") != std::string::npos);
 
             const auto comma = topics[i].find(',');
             if (comma == std::string::npos)
@@ -220,9 +221,15 @@ public:
         const bool zoom_changed = (zoom != last_zoom_);
 
         std::array<std::string, 6> slot_strs;
+        std::array<int, 6> slot_dirs;
+        std::array<int, 6> slot_dirs2;
         for (size_t i = 0; i < 6; ++i)
+        {
             slot_strs[i] = slots_[i].format();
-        const bool hud_changed = (slot_strs != hud_slot_strs_);
+            slot_dirs[i] = slots_[i].get_dir();
+            slot_dirs2[i] = slots_[i].get_dir2();
+        }
+        const bool hud_changed = (slot_strs != hud_slot_strs_) || (slot_dirs != hud_slot_dirs_) || (slot_dirs2 != hud_slot_dirs2_);
 
         // Нечего перерисовывать - не тратим время
         if (!new_frame && !zoom_changed && !hud_changed && !force_redraw_)
@@ -232,6 +239,8 @@ public:
         last_zoom_ = zoom;
         force_redraw_ = false;
         hud_slot_strs_ = slot_strs;
+        hud_slot_dirs_ = slot_dirs;
+        hud_slot_dirs2_ = slot_dirs2;
 
 #ifdef VR_HUD_USE_CUDA
         if (use_gpu_)
@@ -249,9 +258,25 @@ private:
     {
         std::string label, unit;
         bool is_int = false;
+        bool is_dir = false;
         bool has_second = false;
         std::atomic<float> val1{std::nanf("")}; // NaN = данных ещё нет
         std::atomic<float> val2{std::nanf("")};
+
+        int get_dir() const
+        {
+            if (!is_dir)
+                return -2;
+            const float v = val1.load();
+            return std::isnan(v) ? -1 : static_cast<int>(std::lround(v));
+        }
+        int get_dir2() const
+        {
+            if (!is_dir || !has_second)
+                return -2;
+            const float v = val1.load();
+            return std::isnan(v) ? -1 : static_cast<int>(std::lround(v));
+        }
 
         std::string format_val(float v) const
         {
@@ -262,6 +287,9 @@ private:
 
         std::string format() const
         {
+            if (is_dir)
+                return label + ":";
+
             std::string s = label + ": " + format_val(val1.load());
             if (has_second)
                 s += "/" + format_val(val2.load());
@@ -271,6 +299,31 @@ private:
         }
     };
 
+    static void draw_dir_arrow(cv::Mat &img, cv::Point center, int dir)
+    {
+        const cv::Scalar color(0, 255, 0);
+        if (dir < 0 || dir > 8)
+        {
+            cv::putText(img, "--", cv::Point(center.x - 10, center.y + 7),
+                        SLOT_FONT, SLOT_SCALE, color, SLOT_THICK, cv::LINE_AA);
+            return;
+        }
+        if (dir == 0)
+        {
+            // Для 0 (стоп / центр) рисуем заполненный кружок
+            cv::circle(img, center, 5, color, -1, cv::LINE_AA);
+            return;
+        }
+        // Углы для значений 1..8:
+        // 1 = вверх, 2 = вверх-вправо, 3 = вправо, 4 = вниз-вправо,
+        // 5 = вниз,  6 = вниз-влево,   7 = влево,  8 = вверх-влево
+        constexpr double angles_deg[9] = {0.0, -90.0, -45.0, 0.0, 45.0, 90.0, 135.0, 180.0, -135.0};
+        const double rad = angles_deg[dir] * CV_PI / 180.0;
+        const double r = 13.0; // половина длины стрелки в пикселях
+        cv::Point p1(std::lround(center.x - r * std::cos(rad)), std::lround(center.y - r * std::sin(rad)));
+        cv::Point p2(std::lround(center.x + r * std::cos(rad)), std::lround(center.y + r * std::sin(rad)));
+        cv::arrowedLine(img, p1, p2, color, 2, cv::LINE_AA, 0, 0.45);
+    }
     // Рисует один ряд из 3 слотов (слева / центр / справа) в области SLOT_ROW_W x SLOT_ROW_H
     // с левым верхним углом (ox, oy). Текст центрируется в своей колонке.
     void draw_slot_row(cv::Mat &img, int row, int ox, int oy) const
@@ -278,12 +331,56 @@ private:
         const int col_w = SLOT_ROW_W / 3;
         for (int c = 0; c < 3; ++c)
         {
-            const std::string &s = hud_slot_strs_[row * 3 + c];
+            const size_t idx = row * 3 + c;
+            const std::string &s = hud_slot_strs_[idx];
             int base = 0;
             const cv::Size ts = cv::getTextSize(s, SLOT_FONT, SLOT_SCALE, SLOT_THICK, &base);
             const int cx = ox + c * col_w + col_w / 2;
-            cv::putText(img, s, cv::Point(cx - ts.width / 2, oy + SLOT_ROW_H / 2 + ts.height / 2),
-                        SLOT_FONT, SLOT_SCALE, cv::Scalar(0, 255, 0), SLOT_THICK, cv::LINE_AA);
+            const int cy = oy + SLOT_ROW_H / 2;
+                        if (slots_[idx].is_dir)
+            {
+                const cv::Scalar green(0, 255, 0);
+                if (slots_[idx].has_second)
+                {
+                    int slash_base = 0;
+                    const cv::Size slash_sz = cv::getTextSize("/", SLOT_FONT, SLOT_SCALE, SLOT_THICK, &slash_base);
+                    const int arrow_w = 28; // ширина области под одну стрелку
+                    const int pad = 6;      // отступ вокруг элементов
+                    const int total_w = ts.width + pad + arrow_w + pad + slash_sz.width + pad + arrow_w;
+                    
+                    int cur_x = cx - total_w / 2;
+                    
+                    // 1. Метка ("D:")
+                    cv::putText(img, s, cv::Point(cur_x, cy + ts.height / 2),
+                                SLOT_FONT, SLOT_SCALE, green, SLOT_THICK, cv::LINE_AA);
+                    cur_x += ts.width + pad;
+
+                    // 2. Первая стрелка (/rover/tdir)
+                    draw_dir_arrow(img, cv::Point(cur_x + arrow_w / 2, cy), hud_slot_dirs_[idx]);
+                    cur_x += arrow_w + pad;
+
+                    // 3. Разделитель "/"
+                    cv::putText(img, "/", cv::Point(cur_x, cy + slash_sz.height / 2),
+                                SLOT_FONT, SLOT_SCALE, green, SLOT_THICK, cv::LINE_AA);
+                    cur_x += slash_sz.width + pad;
+
+                    // 4. Вторая стрелка (/host/tdir)
+                    draw_dir_arrow(img, cv::Point(cur_x + arrow_w / 2, cy), hud_slot_dirs2_[idx]);
+                }
+                else
+                {
+                    const int gap = 24;
+                    cv::putText(img, s, cv::Point(cx - (ts.width + gap) / 2, cy + ts.height / 2),
+                                SLOT_FONT, SLOT_SCALE, green, SLOT_THICK, cv::LINE_AA);
+                    cv::Point arrow_center(cx + (ts.width + gap) / 2 - 6, cy);
+                    draw_dir_arrow(img, arrow_center, hud_slot_dirs_[idx]);
+                }
+            }
+            else
+            {
+                cv::putText(img, s, cv::Point(cx - ts.width / 2, cy + ts.height / 2),
+                            SLOT_FONT, SLOT_SCALE, cv::Scalar(0, 255, 0), SLOT_THICK, cv::LINE_AA);
+            }
         }
     }
     struct Placement
@@ -329,24 +426,24 @@ private:
         // Масштабируем ОДИН раз для обоих глаз
         cv::resize(frame, resized_cpu_, cv::Size(pl[0].tw, pl[0].th), 0, 0,
                    pl[0].scale < 1.0f ? cv::INTER_AREA : cv::INTER_LINEAR);
-                for (int e = 0; e < 2; e++)
-                {
-                    const bool is_left = (e == 0);
-                    canvas_cpu_.setTo(cv::Scalar::all(0));
-                    cv::Rect dst, src;
-                    if (placement_rects(pl[e], dst, src))
-                    {
-                        resized_cpu_(src).copyTo(canvas_cpu_(dst));
-                    }
-                    for (int r = 0; r < 2; ++r)
-                    {
-                        draw_slot_row(canvas_cpu_, r, slot_row_x(is_left), slot_row_y(r));
-                    }
-                    cv::remap(canvas_cpu_, distorted_cpu_, map_x_[e], map_y_[e],
-                            cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
-                    cv::Mat eye_out = sbs_cpu_(cv::Rect(e * EYE_W, 0, EYE_W, EYE_H));
-                    distorted_cpu_.copyTo(eye_out, mask_cpu_[e]);
-                }
+        for (int e = 0; e < 2; e++)
+        {
+            const bool is_left = (e == 0);
+            canvas_cpu_.setTo(cv::Scalar::all(0));
+            cv::Rect dst, src;
+            if (placement_rects(pl[e], dst, src))
+            {
+                resized_cpu_(src).copyTo(canvas_cpu_(dst));
+            }
+            for (int r = 0; r < 2; ++r)
+            {
+                draw_slot_row(canvas_cpu_, r, slot_row_x(is_left), slot_row_y(r));
+            }
+            cv::remap(canvas_cpu_, distorted_cpu_, map_x_[e], map_y_[e],
+                      cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
+            cv::Mat eye_out = sbs_cpu_(cv::Rect(e * EYE_W, 0, EYE_W, EYE_H));
+            distorted_cpu_.copyTo(eye_out, mask_cpu_[e]);
+        }
         out = sbs_cpu_;
     }
 #ifdef VR_HUD_USE_CUDA
@@ -363,7 +460,6 @@ private:
             gpu_row_mask_[r].upload(row_mask);
         }
     }
-
     void render_gpu(const cv::Mat &frame, bool new_frame, bool need_resize, float zoom,
                     bool hud_changed, cv::Mat &out)
     {
@@ -376,10 +472,6 @@ private:
             cv::cuda::resize(gpu_frame_, gpu_resized_, cv::Size(pl[0].tw, pl[0].th), 0, 0,
                              pl[0].scale < 1.0f ? cv::INTER_AREA : cv::INTER_LINEAR);
         }
-                if (hud_changed || gpu_row_img_[0].empty())
-            rebuild_hud_overlay();
-                if (hud_changed || gpu_row_img_[0].empty())
-            rebuild_hud_overlay();
         if (hud_changed || gpu_row_img_[0].empty())
             rebuild_hud_overlay();
         for (int e = 0; e < 2; e++)
@@ -460,6 +552,8 @@ py[x] = ny * distortion * (h / 2.0f) + cy;
     float last_zoom_ = -1.0f;
     float ipd_shift_ = 0.0f;
     std::array<std::string, 6> hud_slot_strs_;
+    std::array<int, 6> hud_slot_dirs_{-2, -2, -2, -2, -2, -2};
+    std::array<int, 6> hud_slot_dirs2_{-2, -2, -2, -2, -2, -2};
     cv::Mat map_x_[2], map_y_[2], mask_cpu_[2];
     cv::Mat sbs_cpu_, canvas_cpu_, resized_cpu_, distorted_cpu_, waiting_img_;
 #ifdef VR_HUD_USE_CUDA

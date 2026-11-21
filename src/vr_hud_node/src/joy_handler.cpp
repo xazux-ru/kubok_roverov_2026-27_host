@@ -24,6 +24,8 @@ public:
     pub_right_trigger_ = this->create_publisher<std_msgs::msg::Float32>("/gamepad/right_trigger", 10);
 
     pub_host_gear_     = this->create_publisher<std_msgs::msg::Int32>("/host/gear", 10);
+    pub_host_scam_     = this->create_publisher<std_msgs::msg::Int32>("/host/scam", 10);
+    pub_host_tdir_     = this->create_publisher<std_msgs::msg::Int32>("/host/tdir", 10);
     // --- КНОПКИ (10 штук) ---
     pub_btn_x_         = this->create_publisher<std_msgs::msg::Bool>("/gamepad/btn_x", 10);
     pub_btn_y_         = this->create_publisher<std_msgs::msg::Bool>("/gamepad/btn_y", 10);
@@ -32,14 +34,16 @@ public:
     pub_btn_back_      = this->create_publisher<std_msgs::msg::Bool>("/gamepad/btn_back", 10);
     pub_btn_start_     = this->create_publisher<std_msgs::msg::Bool>("/gamepad/btn_start", 10);
     pub_btn_guide_     = this->create_publisher<std_msgs::msg::Bool>("/gamepad/btn_guide", 10);
-    pub_btn_l_stick_   = this->create_publisher<std_msgs::msg::Bool>("/gamepad/btn_left_stick", 10);
     pub_btn_r_stick_   = this->create_publisher<std_msgs::msg::Bool>("/gamepad/btn_right_stick", 10);
   }
 
 private:
   short gear = 0;
   bool gearchanged = 0, gear_cooldown_passed = 0;
+  short cam_number = 0;
+  short targetdir = 0;
   rclcpp::Time last_gear_time_{0, 0, RCL_ROS_TIME};
+
   void publish_araw(const float data,
                     const rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr & pub)
   {
@@ -78,8 +82,8 @@ private:
   {
     auto now = this->now();
     gear_cooldown_passed = (now - last_gear_time_).seconds() >= 0.3;
-    publish_axis(msg, 0, pub_host_speed_);
-    publish_axis(msg, 1, pub_host_dir_);
+    publish_axis(msg, 0, pub_host_dir_);
+    publish_axis(msg, 1, pub_host_speed_);
     publish_axis(msg, 2, pub_right_stick_y_);
     publish_axis(msg, 3, pub_right_stick_x_);
     publish_axis(msg, 4, pub_left_trigger_);
@@ -100,6 +104,50 @@ private:
     }
     else if (msg->buttons[0] == 0 && msg->buttons[1] == 0 && gearchanged) gearchanged = 0;
 
+    if (msg->buttons[9] == 1){
+      cam_number = 2;
+      publish_iraw(cam_number, pub_host_scam_);
+    } else if (msg->axes[1] >= 0 && cam_number != 0){
+      cam_number = 0;
+      publish_iraw(cam_number, pub_host_scam_);
+    } else if (msg->axes[1] < 0 && cam_number != 1){
+      cam_number = 1;
+      publish_iraw(cam_number, pub_host_scam_);
+    }
+
+    switch ( ((msg->axes[1] == 0) ? 0:((msg->axes[1] > 0) ? 1:2))*10 + ((msg->axes[0] == 0) ? 0:((msg->axes[0] > 0) ? 1:2)) ){
+      case 0:
+        targetdir = 0;
+        break;
+      case 10:
+        targetdir = 1;
+        break;
+      case 12:
+        targetdir = 2;
+        break;
+      case 2:
+        targetdir = 3;
+        break;
+      case 22:
+        targetdir = 4;
+        break;
+      case 20:
+        targetdir = 5;
+        break;
+      case 21:
+        targetdir = 6;
+        break;
+      case 1:
+        targetdir = 7;
+        break;
+      case 11:
+        targetdir = 8;
+        break;
+      default:
+        break;
+    }
+    publish_iraw(targetdir, pub_host_tdir_);
+
     publish_button(msg, 2, pub_btn_x_);
     publish_button(msg, 3, pub_btn_y_);
     publish_button(msg, 4, pub_btn_lb_);
@@ -107,7 +155,6 @@ private:
     publish_button(msg, 6, pub_btn_back_);
     publish_button(msg, 7, pub_btn_start_);
     publish_button(msg, 8, pub_btn_guide_);
-    publish_button(msg, 9, pub_btn_l_stick_);
     publish_button(msg, 10, pub_btn_r_stick_);
   }
 
@@ -123,6 +170,8 @@ private:
 
   // Int vars
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr pub_host_gear_;
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr pub_host_scam_;
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr pub_host_tdir_;
 
   // Bool vars
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_btn_x_;
@@ -132,7 +181,6 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_btn_back_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_btn_start_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_btn_guide_;
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_btn_l_stick_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_btn_r_stick_;
 };
 
